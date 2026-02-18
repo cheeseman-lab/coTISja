@@ -11,6 +11,10 @@ import re
 from tqdm import tqdm
 
 GTF_FILE = '/lab/barcheese01/aTIS_data/ribotish/gencode.v49.primary_assembly.annotation.gtf'
+GENOME_FILE = '/lab/barcheese01/smaffa/coTISja/data/reference/Gencode_v49_GRCh38.primary_assembly.genome.fa'
+PROTEIN_FASTA = '/lab/barcheese01/smaffa/coTISja/data/reference/gencode.v49.pc_translations.fa'
+REPLICATE_MANIFEST_FILE = '/lab/barcheese01/smaffa/coTISja/data/ribotish_replicate_manifest.csv'
+SAMPLE_MANIFEST_FILE = '/lab/barcheese01/smaffa/coTISja/data/ribotish_sample_manifest.csv'
 
 # Adapted from swissisoform.genome without the GenomeHandler object
 def load_transcript_annotations(gtf_path: str, nrows=None, feature_type='transcript') -> pd.DataFrame:
@@ -140,8 +144,8 @@ def recategorize_tis_type(tis_df, original_column='TisType', output_column='Reca
     return tis_df
 
 def load_experiment_manifest(
-    sample_file='/lab/barcheese01/smaffa/ribotish_sample_manifest.csv', 
-    replicate_file='/lab/barcheese01/smaffa/ribotish_replicate_manifest.csv'
+    sample_file=SAMPLE_MANIFEST_FILE, 
+    replicate_file=REPLICATE_MANIFEST_FILE
 ):
     replicate_df = pd.read_csv(replicate_file)
     sample_df = pd.read_csv(sample_file)
@@ -512,3 +516,160 @@ def write_csv_to_wig_file(input_file, output_file, track_name, track_description
                     if counts != 0:
                         f.write(f'{locus} {counts}\n')
     print(f'Saved file to {os.path.join(output_dirpath, output_file)}')
+
+
+##### GTF handling #####
+
+def load_gtf_annotations(gtf_path=GTF_FILE, features=['start_codon', 'CDS', 'UTR']):
+    annotation_tables = []
+    if isinstance(features, str):
+        features = [features]
+    for feature in features:
+        print(f'Reading {feature}s from {gtf_path}')
+        annotation_tables.append(load_transcript_annotations(gtf_path=gtf_path, feature_type=feature))
+    if len(annotation_tables) == 1:
+        return annotation_tables[0]
+    else:
+        return annotation_tables
+    
+def get_start_codons(start_codon_annotations=None, genome_file=GENOME_FILE, gtf_path=GTF_FILE):
+    from pyfaidx import Fasta
+    from Bio.Seq import Seq
+
+    assert os.path.exists(genome_file), 'must supply an assembly fasta file as reference'
+    genome = Fasta(genome_file)
+
+    if start_codon_annotations is None:
+        assert os.path.exists(gtf_path), 'if `start_codon_annotations` not provided, must provide a GTF file'
+        start_codon_annotations = load_gtf_annotations(gtf_path=gtf_path, features=['start_codon'])
+
+    transcript_to_start_codon = dict()
+    for i in tqdm(start_codon_annotations.index.tolist()):
+        chrom = start_codon_annotations.loc[i, 'chromosome']
+        start = start_codon_annotations.loc[i, 'start']
+        end = start_codon_annotations.loc[i, 'end']
+        strand = start_codon_annotations.loc[i, 'strand']
+        transcript_id = start_codon_annotations.loc[i, 'transcript_id']
+
+        seq = Seq(genome[chrom][start-1:end].seq)
+
+        if strand == '-':
+            seq = seq.reverse_complement()
+            
+        transcript_to_start_codon[transcript_id] = str(seq)
+    transcript_to_start_codon = pd.DataFrame(pd.Series(transcript_to_start_codon, name='StartCodon')).reset_index(names=['Tid'])
+    return transcript_to_start_codon
+
+def get_utr_lengths(cds_annotations=None, utr_annotations=None, gtf_path=GTF_FILE):
+    """
+    Get start positions for canonical TISs
+    """
+    # Load annotations for UTRs and CDSs (from which to identify 5' UTRs)
+    if cds_annotations is None or utr_annotations is None:
+        assert os.path.exists(gtf_path), 'if `cds_annotations` or `utr_annotations` not provided, must provide a GTF file'
+    if utr_annotations is None:
+        utr_annotations = load_gtf_annotations(gtf_path=gtf_path, features=['UTR'])
+    if cds_annotations is None:
+        cds_annotations = load_gtf_annotations(gtf_path=gtf_path, features=['CDS'])
+
+    # Get 5' CDS annotations
+    forward_cds_start_idxs = cds_annotations[cds_annotations['strand'] == '+'].reset_index().sort_values(['transcript_id', 'start']).groupby('transcript_id').first()['index']
+    reverse_cds_start_idxs = cds_annotations[cds_annotations['strand'] == '-'].reset_index().sort_values(['transcript_id', 'start'], ascending=[False, True]).groupby('transcript_id').first()['index']
+    first_cds = cds_annotations.loc[forward_cds_start_idxs.tolist() + reverse_cds_start_idxs.tolist()]
+
+    # Merge the CDS start positions with the UTR annotations and filter based on strand
+    utr_df = utr_annotations.merge(first_cds[['start', 'transcript_id']].rename({'start': 'cds_start'}, axis=1), left_on='transcript_id', right_on='transcript_id')
+    utr_df = utr_df[
+        ((utr_df['strand'] == '+') & (utr_df['end'] < utr_df['cds_start'])) | # forward strand, keep UTRs upstream of CDS
+        ((utr_df['strand'] == '-') & (utr_df['end'] > utr_df['cds_start'])) # reverse strand, keep UTRs upstream of CDS in reverse direction
+    ]
+    # Calculate the total segment length of UTRs on the 5' end
+    utr_df['utr_length'] = (utr_df['end'] - utr_df['start'] + 1)
+    concat_utr_length = pd.DataFrame(utr_df.groupby('transcript_id')['utr_length'].sum()).reset_index(names=['Tid'])
+    return concat_utr_length
+
+def get_canonical_genome_positions(cds_annotations=None, gtf_path=GTF_FILE):
+    if cds_annotations is None:
+        assert os.path.exists(gtf_path), 'if `cds_annotations` not provided, must provide a GTF file'
+        cds_annotations = load_gtf_annotations(gtf_path=gtf_path, features=['CDS'])
+    
+    sorted_cds_annotations = cds_annotations.sort_values(['transcript_id', 'start']) # used to find start and end of coding sequence
+    unique_transcript_cds_annotations = sorted_cds_annotations.drop_duplicates(subset=['transcript_id']) # used to extract common annotations
+
+    transcript_starts = sorted_cds_annotations.groupby('transcript_id').first()['start']
+    transcript_ends = sorted_cds_annotations.groupby('transcript_id').last()['end']
+    transcript_chromosomes = unique_transcript_cds_annotations.set_index('transcript_id')['chromosome']
+    transcript_strands = unique_transcript_cds_annotations.set_index('transcript_id')['strand']
+
+    # combine annotations and assemble genome position string relative to strand
+    cds_genome_pos_df = pd.concat([transcript_chromosomes, transcript_starts, transcript_ends, transcript_strands], axis=1)
+    cds_genome_pos_df['GenomePos'] = cds_genome_pos_df.apply(
+        lambda x: f'{x["chromosome"]}:{x["start"]}-{x["end"]}:{x["strand"]}' if strand == '+' else f'{x["chromosome"]}:{x["end"]}-{x["start"]}:{x["strand"]}',
+        axis=1
+    )
+    cds_genome_pos_df.index.name = 'Tid'
+
+    return cds_genome_pos_df
+
+def get_protein_products(protein_fasta=PROTEIN_FASTA):
+    from Bio import SeqIO
+
+    print(f'Reading protein sequences from {protein_fasta}')
+
+    gencode_protein_products = dict()
+    for record in SeqIO.parse(PROTEIN_FASTA, format='fasta'):
+        sequence_ids = record.id
+        transcript_id = [tag for tag in sequence_ids.split('|') if 'ENST' in tag][0]
+        gencode_protein_products[transcript_id] = str(record.seq)
+    gencode_protein_products = pd.DataFrame(pd.Series(gencode_protein_products), columns=['AASeq']).reset_index(names=['Tid'])
+    gencode_protein_products['AALen'] = gencode_protein_products['AASeq'].apply(lambda x: len(x))
+
+    return gencode_protein_products
+
+##### Imputation #####
+
+def impute_missing_canonical_starts(
+    tis_df, 
+    transcript_ids=None, 
+    genome_pos=None, utr_lengths=None, start_codons=None, protein_products=None,
+    start_codon_annotations=None, cds_annotations=None, utr_annotations=None, genome_file=GENOME_FILE, gtf_path=GTF_FILE, protein_fasta=PROTEIN_FASTA,
+    static_annotations={'TisType': 'Annotated', 'RecatTISType': 'Annotated', 'TISGroup': 0, 'TISCounts': 0, 'NormTISCounts': 0}
+):
+    if transcript_ids is None:
+        transcript_ids = tis_df['Tid'].unique().tolist() # initialize to all
+    missing_canonical_ids = tis_df.assign(has_annotated=lambda x: x['RecatTISType'] == 'Annotated').groupby('Tid')['has_annotated'].sum().loc[lambda x: x == 0].index.tolist()
+    transcript_ids = set(missing_canonical_ids).intersection(transcript_ids)
+
+    # Get existing annotations per transcript id 
+    existing_tis_annotations = tis_df[tis_df['Tid'].isin(transcript_ids)].drop_duplicates(subset=['Tid']).loc[
+        :, ['Gid', 'Tid', 'Symbol', 'GeneType', 'MANE_Select', 'transcript_support_level']
+    ]
+
+    # For each of the additional columns, run the corresponding function if not provided
+    if genome_pos is None:
+        genome_pos = get_canonical_genome_positions(cds_annotations=cds_annotations, gtf_path=gtf_path)
+    genome_pos = genome_pos[['Tid', 'GenomePos']]
+
+    if utr_lengths is None:
+        utr_lengths = get_utr_lengths(cds_annotations=cds_annotations, utr_annotations=utr_annotations, gtf_path=gtf_path)
+    utr_lengths = utr_lengths.rename({'utr_length': 'Start'}, axis=1)
+
+    if start_codons is None:
+        start_codons = get_start_codons(start_codon_annotations=start_codon_annotations, genome_file=genome_file, gtf_path=gtf_path)
+    
+    if protein_products is None:
+        protein_products = get_protein_products(protein_fasta=protein_fasta)
+    protein_products = protein_products[['Tid', 'AALen']]
+
+    # merge all annotations
+    imputed_tis_df = existing_tis_annotations.merge(genome_pos, how='left').merge(utr_lengths, how='left').merge(start_codons, how='left').merge(protein_products, how='left')
+    imputed_tis_df = imputed_tis_df.dropna(subset=['GenomePos', 'Start', 'StartCodon', 'AALen'])
+
+    # assign static annotations
+    for k, v in static_annotations.items():
+        imputed_tis_df[k] = v
+
+    imputed_tis_df['Imputed'] = True
+    
+    return imputed_tis_df
+
