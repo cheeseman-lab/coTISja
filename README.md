@@ -12,6 +12,8 @@ conda activate riboseq
 
 # src
 
+Contains exploratory notebooks for analysis and scripting files for processing.
+
 ## notebooks
 
 ## scripts
