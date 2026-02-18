@@ -607,7 +607,7 @@ def get_canonical_genome_positions(cds_annotations=None, gtf_path=GTF_FILE):
     # combine annotations and assemble genome position string relative to strand
     cds_genome_pos_df = pd.concat([transcript_chromosomes, transcript_starts, transcript_ends, transcript_strands], axis=1)
     cds_genome_pos_df['GenomePos'] = cds_genome_pos_df.apply(
-        lambda x: f'{x["chromosome"]}:{x["start"]}-{x["end"]}:{x["strand"]}' if strand == '+' else f'{x["chromosome"]}:{x["end"]}-{x["start"]}:{x["strand"]}',
+        lambda x: f'{x["chromosome"]}:{x["start"]}-{x["end"]}:{x["strand"]}' if x['strand'] == '+' else f'{x["chromosome"]}:{x["end"]}-{x["start"]}:{x["strand"]}',
         axis=1
     )
     cds_genome_pos_df.index.name = 'Tid'
