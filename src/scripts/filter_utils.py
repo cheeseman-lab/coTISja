@@ -556,7 +556,10 @@ def get_start_codons(start_codon_annotations=None, genome_file=GENOME_FILE, gtf_
         if strand == '-':
             seq = seq.reverse_complement()
             
-        transcript_to_start_codon[transcript_id] = str(seq)
+        if transcript_id in transcript_to_start_codon:
+            transcript_to_start_codon[transcript_id] = transcript_to_start_codon[transcript_id] + str(seq)
+        else:
+            transcript_to_start_codon[transcript_id] = str(seq)
     transcript_to_start_codon = pd.DataFrame(pd.Series(transcript_to_start_codon, name='StartCodon')).reset_index(names=['Tid'])
     return transcript_to_start_codon
 
