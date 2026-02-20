@@ -356,6 +356,9 @@ def filter_ribotish_results(
     )
 
     tis_df = tis_df.copy()
+    tis_df['GenomeStart'] = tis_df['GenomePos'].apply(
+        lambda x: f'{x.split("-")[0]}' if (x.split(":")[-1] == '+') else f'{x.split(":")[0]}:{x.split(":")[1].split("-")[1]}'
+    )
     tis_df['DropReason'] = None
     print(f'Identified {len(reference_tids)} transcript IDs to use...')
     reference_mask = tis_df['Tid'].isin(reference_tids)
@@ -381,7 +384,7 @@ def filter_ribotish_results(
     for tid, idxs in tqdm(reference_tis_df.groupby('Tid').groups.items()):
         subset = reference_tis_df.loc[idxs, :].sort_values([count_col], ascending=False)
         while subset.shape[0] > 0:
-            # If the annotated start site is present for any transcript, , then remove it and its neighbors
+            # If the annotated start site is present for any transcript, then remove it and its neighbors
             annotated_mask = subset['TisType'].str.contains('Annotated')
             assert annotated_mask.sum() <= 1, f"transcript {tid} has more than 1 annotated canonical start site"
             if annotated_mask.sum() > 0:
@@ -403,7 +406,9 @@ def filter_ribotish_results(
     inclusion_mask = tis_df['DropReason'].isnull()
     filtered_tis_df = tis_df[inclusion_mask].reset_index(drop=True)
     dropped_tis_df = tis_df[~inclusion_mask].reset_index(drop=True)
-    print(f'Keeping a total of {filtered_tis_df.shape[0]} TISs')
+    print(f'Keeping a total of {filtered_tis_df.shape[0]} TISs representing unique protein isoforms')
+    print(f'These TISs represent {len(filtered_tis_df["GenomeStart"].unique())} unique genomic positions')
+
     if return_dropped:
         return filtered_tis_df, dropped_tis_df
     else:
@@ -521,6 +526,13 @@ def write_csv_to_wig_file(input_file, output_file, track_name, track_description
 ##### GTF handling #####
 
 def load_gtf_annotations(gtf_path=GTF_FILE, features=['start_codon', 'CDS', 'UTR']):
+    """
+    Returns a list of dataframes extracting fields from a .gtf annotation file, one dataframe per feature type. Each dataframe is a filtering on the full
+    annotation table, keeping only the entries with the feature_type corresponding to the elements of `features`
+    
+    :param gtf_path: Description
+    :param features: Description
+    """
     annotation_tables = []
     if isinstance(features, str):
         features = [features]
@@ -533,6 +545,13 @@ def load_gtf_annotations(gtf_path=GTF_FILE, features=['start_codon', 'CDS', 'UTR
         return annotation_tables
     
 def get_start_codons(start_codon_annotations=None, genome_file=GENOME_FILE, gtf_path=GTF_FILE):
+    """
+    Extract start codon sequences for the `start_codon` annotations in a .gtf file
+    
+    :param start_codon_annotations: Description
+    :param genome_file: Description
+    :param gtf_path: Description
+    """
     from pyfaidx import Fasta
     from Bio.Seq import Seq
 
@@ -565,7 +584,7 @@ def get_start_codons(start_codon_annotations=None, genome_file=GENOME_FILE, gtf_
 
 def get_utr_lengths(cds_annotations=None, utr_annotations=None, gtf_path=GTF_FILE):
     """
-    Get start positions for canonical TISs
+    Calculate 5' UTR lengths, which is equivalent to the `Start` position of the annotated start codon relative to the spliced transcript
     """
     # Load annotations for UTRs and CDSs (from which to identify 5' UTRs)
     if cds_annotations is None or utr_annotations is None:
@@ -592,6 +611,12 @@ def get_utr_lengths(cds_annotations=None, utr_annotations=None, gtf_path=GTF_FIL
     return concat_utr_length
 
 def get_canonical_genome_positions(cds_annotations=None, gtf_path=GTF_FILE):
+    """
+    Generate strings detailing the genomic position of the outermost CDS regions in each transcript
+    
+    :param cds_annotations: Description
+    :param gtf_path: Description
+    """
     if cds_annotations is None:
         assert os.path.exists(gtf_path), 'if `cds_annotations` not provided, must provide a GTF file'
         cds_annotations = load_gtf_annotations(gtf_path=gtf_path, features=['CDS'])
@@ -606,15 +631,18 @@ def get_canonical_genome_positions(cds_annotations=None, gtf_path=GTF_FILE):
 
     # combine annotations and assemble genome position string relative to strand
     cds_genome_pos_df = pd.concat([transcript_chromosomes, transcript_starts, transcript_ends, transcript_strands], axis=1)
-    cds_genome_pos_df['GenomePos'] = cds_genome_pos_df.apply(
-        lambda x: f'{x["chromosome"]}:{x["start"]}-{x["end"]}:{x["strand"]}' if x['strand'] == '+' else f'{x["chromosome"]}:{x["end"]}-{x["start"]}:{x["strand"]}',
-        axis=1
-    )
+    cds_genome_pos_df['GenomePos'] = cds_genome_pos_df.apply(lambda x: f'{x["chromosome"]}:{x["start"]}-{x["end"]}:{x["strand"]}', axis=1)
     cds_genome_pos_df.index.name = 'Tid'
+    cds_genome_pos_df = cds_genome_pos_df.reset_index()
 
     return cds_genome_pos_df
 
 def get_protein_products(protein_fasta=PROTEIN_FASTA):
+    """
+    Reads in a fasta of all protein sequences to create a mapping of transcript IDs to translated protein sequences
+    
+    :param protein_fasta: Description
+    """
     from Bio import SeqIO
 
     print(f'Reading protein sequences from {protein_fasta}')
@@ -638,6 +666,23 @@ def impute_missing_canonical_starts(
     start_codon_annotations=None, cds_annotations=None, utr_annotations=None, genome_file=GENOME_FILE, gtf_path=GTF_FILE, protein_fasta=PROTEIN_FASTA,
     static_annotations={'TisType': 'Annotated', 'RecatTISType': 'Annotated', 'TISGroup': 0, 'TISCounts': 0, 'NormTISCounts': 0}
 ):
+    """
+    Given a filtered output from ribotish, creates a table of entries for canonical starts that were undetected by `ribotish predict`
+    
+    :param tis_df: Description
+    :param transcript_ids: Description
+    :param genome_pos: Description
+    :param utr_lengths: Description
+    :param start_codons: Description
+    :param protein_products: Description
+    :param start_codon_annotations: Description
+    :param cds_annotations: Description
+    :param utr_annotations: Description
+    :param genome_file: Description
+    :param gtf_path: Description
+    :param protein_fasta: Description
+    :param static_annotations: Description
+    """
     if transcript_ids is None:
         transcript_ids = tis_df['Tid'].unique().tolist() # initialize to all
     missing_canonical_ids = tis_df.assign(has_annotated=lambda x: x['RecatTISType'] == 'Annotated').groupby('Tid')['has_annotated'].sum().loc[lambda x: x == 0].index.tolist()
