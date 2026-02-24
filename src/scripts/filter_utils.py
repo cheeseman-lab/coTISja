@@ -191,7 +191,22 @@ def calculate_read_totals_from_bam_qc(
 
     return np.sum([c for c in read_totals_per_length.values()])
 
-def normalize_tis_counts(tis_df, bam_qc_files=None, total=None, scale_factor=1e6, count_col = 'TISCounts', output_col='NormTISCounts'):
+def read_rnaseq_counts(
+    rnaseq_qc_filepath,
+):
+    """
+    Extract mapped readcount totals from corresponding RNA-seq mapping results
+    
+    :param rnaseq_qc_filepath: Description
+    """
+    gene_counts = pd.read_csv(rnaseq_qc_filepath, sep='\t', header=None, names=['Gid', 'counts'])
+    gene_counts = gene_counts.set_index('Gid')['counts']
+    qc_indices = ['__no_feature', '__ambiguous', '__too_low_aQual', '__not_aligned', '__alignment_not_unique']
+    qc_counts = gene_counts.loc[gene_counts.index.isin(qc_indices)]
+    gene_counts = gene_counts.loc[~gene_counts.index.isin(qc_indices)]
+    return gene_counts
+
+def normalize_tis_counts(tis_df, bam_qc_files=None, total=None, divisor_column=None, scale_factor=1e6, count_col = 'TISCounts', output_col='NormTISCounts'):
     """
     Normalize TIS counts in a ribotish result table, using an RPM transformation by default
     
@@ -203,14 +218,18 @@ def normalize_tis_counts(tis_df, bam_qc_files=None, total=None, scale_factor=1e6
     :param output_col: Description
     """
     tis_df = tis_df.copy()
-    if bam_qc_files is not None:
+    if divisor_column is not None: # divide by another column
+        tis_df[output_col] = tis_df[count_col] / tis_df[divisor_column]
+        return tis_df
+    elif bam_qc_files is not None: # divide by mapped reads (read depth)
         if not isinstance(bam_qc_files, list):
             bam_qc_files = [bam_qc_files]
         total = 0
         for bam_qc_file in bam_qc_files:
             total += calculate_read_totals_from_bam_qc(bam_qc_file)
-    if total is None:
+    if total is None: # nothing external provided to normalize
         total = tis_df.drop_duplicates(['Chromosome', 'Locus', 'Strand'])[count_col].sum()
+    # if total is provided manually, use this as the denominator
     tis_df[output_col] = (tis_df[count_col] / total) * scale_factor
     return tis_df
     

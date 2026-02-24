@@ -13,13 +13,18 @@ from filter_utils import *
 # mapping of input files to filtered outputs is in the table /lab/barcheese01/smaffa/ribotish_sample_manifest.csv
 
 # file manifest: maps inputs to outputs
+REPLICATE_LEVEL = False
+
 replicate_df = pd.read_csv('ribotish_replicate_manifest.csv')
 sample_df = pd.read_csv('ribotish_sample_manifest.csv')
-experiment_table = sample_df.merge(
-    replicate_df[
-        replicate_df['condition'] == 'TIS'
-    ].groupby('sample').apply(lambda x: list(x['bam_qc_file'])).rename('bam_qc_file'), left_on='sample', right_index=True
-)
+if REPLICATE_LEVEL:
+    experiment_table = replicate_df.dropna(subset=['predict_file'])
+else:
+    experiment_table = sample_df.merge(
+        replicate_df[
+            replicate_df['condition'] == 'TIS'
+        ].groupby('sample').apply(lambda x: list(x['rnaseq_count_file'])).rename('rnaseq_count_file'), left_on='sample', right_index=True
+    )
 
 # common annotation file
 gtf_df = load_transcript_annotations(GTF_FILE)
@@ -28,28 +33,45 @@ gtf_df = load_transcript_annotations(GTF_FILE)
 columns_to_keep = [
     'Gid', 'Tid', 'Symbol', 'GeneType', 'GenomePos', 
     'Start', 'StartCodon', 'TisType', 'RecatTISType', 'TISGroup', 
-    'TISCounts', 'NormTISCounts', 
+    'TISCounts', 'NormTISCounts', 'GeneRNASeqCounts', 'TotalRNASeqCounts',
+    'AALen', 'MANE_Select', 'transcript_support_level'
+]
+
+columns_to_keep = [
+    'Gid', 'Tid', 'Symbol', 'GeneType', 'GenomePos', 
+    'Start', 'StartCodon', 'TisType', 'RecatTISType', 'TISGroup', 
+    'TISCounts', 'NormTISCounts', 'GeneRNASeqCounts', 'TotalRNASeqCounts',
     'AALen', 'MANE_Select', 'transcript_support_level'
 ]
 
 # iterate through experiments
 for i, exp_row in experiment_table.iterrows():
     # extract input and output filepaths
-    sample_name = exp_row['sample']
+    if REPLICATE_LEVEL:
+        sample_name = f'{exp_row["sample"]}_rep{exp_row["replicate"]}'
+        rnaseq_count_files = [exp_row['rnaseq_count_file']]
+    else:
+        sample_name = exp_row['sample']
+        rnaseq_count_files = exp_row['rnaseq_count_file']
     predict_file = exp_row['predict_file']
     output_file = exp_row['filtered_file']
     dropped_file = exp_row['dropped_file']
-    bam_qc_files = exp_row['bam_qc_file']
     print(f'Processing {sample_name}...')
 
     # import data
     print(f'Reading TIS table from: {predict_file}')
     all_tis_df = import_ribotish_results(predict_file, gtf_df=gtf_df)
+    all_tis_df = recategorize_tis_type(all_tis_df, original_column='TisType', output_column='RecatTISType')
 
     # normalize readcounts
     print('Normalizing using total counts from:')
-    print('\n'.join(bam_qc_files))
-    norm_tis_df = normalize_tis_counts(all_tis_df, bam_qc_files=bam_qc_files)
+    print('\n'.join(rnaseq_count_files))
+    rnaseq_counts = pd.concat([read_rnaseq_counts(f) for f in rnaseq_count_files], axis=1).sum(axis=1).rename('GeneRNASeqCounts')
+    all_tis_df = all_tis_df.merge(rnaseq_counts, left_on=['Gid'], right_index=True, how='left')
+    all_tis_df['GeneRNASeqCounts'] = all_tis_df['GeneRNASeqCounts'].fillna(0)
+    all_tis_df['TotalRNASeqCounts'] = rnaseq_counts.sum()
+    norm_tis_df = normalize_tis_counts(all_tis_df, divisor_column='TotalRNASeqCounts')
+    norm_tis_df['NormTISCounts']  = norm_tis_df['NormTISCounts'] * 1e6
 
     # perform the filtering procedure
     filtered_tis_df, dropped_tis_df = filter_ribotish_results(
@@ -69,10 +91,6 @@ for i, exp_row in experiment_table.iterrows():
         tis_distance_buffer=30,
         return_dropped=True
     )
-
-    # update annotations (should move this above to act on all_tis_df)
-    filtered_tis_df = recategorize_tis_type(filtered_tis_df, original_column='TisType', output_column='RecatTISType')
-    dropped_tis_df = recategorize_tis_type(dropped_tis_df, original_column='TisType', output_column='RecatTISType')
 
     # subset columns to the desired output
     filtered_tis_df = filtered_tis_df.loc[:, columns_to_keep]
