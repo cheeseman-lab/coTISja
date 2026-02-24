@@ -31,7 +31,7 @@ gtf_df = load_transcript_annotations(GTF_FILE)
 
 # define columns to save in output files
 columns_to_keep = [
-    'Gid', 'Tid', 'Symbol', 'GeneType', 'GenomePos', 
+    'Gid', 'Tid', 'Symbol', 'GeneType', 'GenomePos', 'GenomeStart',
     'Start', 'StartCodon', 'TisType', 'RecatTISType', 'TISGroup', 
     'TISCounts', 'NormTISCounts', 'GeneRNASeqCounts', 'TotalRNASeqCounts',
     'AALen', 'MANE_Select', 'transcript_support_level'

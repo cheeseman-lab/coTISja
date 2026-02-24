@@ -152,7 +152,7 @@ def load_experiment_manifest(
     experiment_table = sample_df.merge(
         replicate_df[
             replicate_df['condition'] == 'TIS'
-        ].groupby('sample').apply(lambda x: list(x['bam_qc_file'])).rename('bam_qc_file'), left_on='sample', right_index=True
+        ].groupby('sample').apply(lambda x: list(x['rnaseq_count_file'])).rename('rnaseq_count_file'), left_on='sample', right_index=True
     )
     return experiment_table, sample_df, replicate_df
 
@@ -740,3 +740,41 @@ def impute_missing_canonical_starts(
     
     return imputed_tis_df
 
+
+def tmm_normalization_factors(input_sample, reference_sample, experiment_table=None, m_trim=0.3, a_trim=0.1, **experiment_table_kws):
+    if experiment_table is None:
+        experiment_table, _, _ = load_experiment_manifest(**experiment_table_kws)
+
+    # readcounts per gene
+    unique_gene_rnaseq_counts = pd.concat([read_rnaseq_counts(f) for f in experiment_table.set_index('sample').loc[input_sample, 'rnaseq_count_file']], axis=1).sum(axis=1)
+    unique_gene_rnaseq_counts_ref = pd.concat([read_rnaseq_counts(f) for f in experiment_table.set_index('sample').loc[reference_sample, 'rnaseq_count_file']], axis=1).sum(axis=1)
+
+    # total readcounts for sample and reference
+    n = unique_gene_rnaseq_counts.sum()
+    n_ref = unique_gene_rnaseq_counts_ref.sum()
+
+    # depth-normalized counts for sample and reference
+    norm_y = unique_gene_rnaseq_counts / n 
+    norm_y_ref = unique_gene_rnaseq_counts / n_ref
+
+    # M values and A values
+    A = 0.5 * np.log2(norm_y * norm_y_ref) # A values per gene
+    A[(norm_y == 0) | (norm_y_ref == 0)] = np.nan 
+    M = np.log2(norm_y / norm_y_ref) # M values per gene
+
+    # weights in the sum for the scale factor
+    w = ((n - unique_gene_rnaseq_counts) * norm_y) + ((n_ref - unique_gene_rnaseq_counts_ref) * norm_y_ref)
+
+    # trim most extreme M and A values
+    M_sorted = M.dropna().sort_values()
+    A_sorted = A.dropna().sort_values()
+    n_mtrim = int(m_trim * len(M_sorted)) + 1
+    n_atrim = int(a_trim * len(A_sorted)) + 1
+    m_idx_to_drop = M_sorted.head(n_mtrim).index.tolist() + M_sorted.tail(n_mtrim).index.tolist()
+    a_idx_to_drop = A_sorted.head(n_atrim).index.tolist() + A_sorted.tail(n_atrim).index.tolist()
+    idx_to_keep = list(set(M_sorted.index.tolist() + A_sorted.index.tolist()).difference(set(m_idx_to_drop + a_idx_to_drop)))
+
+    # calculate TMM over remaining values after trimming
+    TMM = (w[idx_to_keep] * M[idx_to_keep]).sum() / w[idx_to_keep].sum()
+
+    return 2 ** TMM
