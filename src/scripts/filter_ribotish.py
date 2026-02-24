@@ -37,13 +37,6 @@ columns_to_keep = [
     'AALen', 'MANE_Select', 'transcript_support_level'
 ]
 
-columns_to_keep = [
-    'Gid', 'Tid', 'Symbol', 'GeneType', 'GenomePos', 
-    'Start', 'StartCodon', 'TisType', 'RecatTISType', 'TISGroup', 
-    'TISCounts', 'NormTISCounts', 'GeneRNASeqCounts', 'TotalRNASeqCounts',
-    'AALen', 'MANE_Select', 'transcript_support_level'
-]
-
 # iterate through experiments
 for i, exp_row in experiment_table.iterrows():
     # extract input and output filepaths
