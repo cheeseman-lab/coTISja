@@ -706,16 +706,18 @@ def impute_missing_canonical_starts(
         transcript_ids = tis_df['Tid'].unique().tolist() # initialize to all
     missing_canonical_ids = tis_df.assign(has_annotated=lambda x: x['RecatTISType'] == 'Annotated').groupby('Tid')['has_annotated'].sum().loc[lambda x: x == 0].index.tolist()
     transcript_ids = set(missing_canonical_ids).intersection(transcript_ids)
+    annotation_columns = [col for col in ['Gid', 'Tid', 'Symbol', 'GeneType', 'MANE_Select', 'transcript_support_level', 'GeneRNASeqCounts', 'TotalRNASeqCounts'] if col in tis_df.columns.tolist()]
 
     # Get existing annotations per transcript id 
-    existing_tis_annotations = tis_df[tis_df['Tid'].isin(transcript_ids)].drop_duplicates(subset=['Tid']).loc[
-        :, ['Gid', 'Tid', 'Symbol', 'GeneType', 'MANE_Select', 'transcript_support_level']
-    ]
+    existing_tis_annotations = tis_df[tis_df['Tid'].isin(transcript_ids)].drop_duplicates(subset=['Tid']).loc[:, annotation_columns]
 
     # For each of the additional columns, run the corresponding function if not provided
     if genome_pos is None:
         genome_pos = get_canonical_genome_positions(cds_annotations=cds_annotations, gtf_path=gtf_path)
     genome_pos = genome_pos[['Tid', 'GenomePos']]
+    genome_pos['GenomeStart'] = genome_pos['GenomePos'].apply(
+        lambda x: f'{x.split("-")[0]}' if (x.split(":")[-1] == '+') else f'{x.split(":")[0]}:{x.split(":")[1].split("-")[1]}'
+    )
 
     if utr_lengths is None:
         utr_lengths = get_utr_lengths(cds_annotations=cds_annotations, utr_annotations=utr_annotations, gtf_path=gtf_path)
