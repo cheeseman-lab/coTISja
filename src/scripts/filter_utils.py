@@ -743,13 +743,13 @@ def impute_missing_canonical_starts(
     return imputed_tis_df
 
 
-def tmm_normalization_factors(input_sample, reference_sample, experiment_table=None, m_trim=0.3, a_trim=0.1, **experiment_table_kws):
+def tmm_normalization_factors(input_sample, reference_sample, experiment_table=None, id_cols=['sample'], m_trim=0.3, a_trim=0.1, **experiment_table_kws):
     if experiment_table is None:
         experiment_table, _, _ = load_experiment_manifest(**experiment_table_kws)
 
     # readcounts per gene
-    unique_gene_rnaseq_counts = pd.concat([read_rnaseq_counts(f) for f in experiment_table.set_index('sample').loc[input_sample, 'rnaseq_count_file']], axis=1).sum(axis=1)
-    unique_gene_rnaseq_counts_ref = pd.concat([read_rnaseq_counts(f) for f in experiment_table.set_index('sample').loc[reference_sample, 'rnaseq_count_file']], axis=1).sum(axis=1)
+    unique_gene_rnaseq_counts = pd.concat([read_rnaseq_counts(f) for f in experiment_table.set_index(id_cols).loc[input_sample, 'rnaseq_count_file']], axis=1).sum(axis=1)
+    unique_gene_rnaseq_counts_ref = pd.concat([read_rnaseq_counts(f) for f in experiment_table.set_index(id_cols).loc[reference_sample, 'rnaseq_count_file']], axis=1).sum(axis=1)
 
     # total readcounts for sample and reference
     n = unique_gene_rnaseq_counts.sum()
@@ -780,3 +780,57 @@ def tmm_normalization_factors(input_sample, reference_sample, experiment_table=N
     TMM = (w[idx_to_keep] * M[idx_to_keep]).sum() / w[idx_to_keep].sum()
 
     return 2 ** TMM
+
+def calculate_normalization_factors(tis_df, pseudocount=1, id_columns=['Sample'], reference_sample='HeLa', **tmm_normalization_kws):
+    tis_df = tis_df.copy()
+    if 'SampleScaleFactor' in tis_df.columns:
+        tis_df = tis_df.drop(['SampleScaleFactor'], axis=1)
+
+    # sample normalization factors
+    if len(id_columns) > 1:
+        samples = list(tis_df[id_columns].drop_duplicates().itertuples(index=False))
+    else:
+        samples = tis_df[id_columns].unique().tolist()
+    sample_normalization_factors = pd.Series(
+        {s: tmm_normalization_factors(s, reference_sample, **tmm_normalization_kws) for s in samples}, name='SampleScaleFactor'
+    )
+    if len(id_columns) > 1:
+        sample_normalization_factors.index.set_names(id_columns)
+    else:
+        sample_normalization_factors.index.name = id_columns
+    tis_df = tis_df.merge(sample_normalization_factors, left_on=id_columns, right_index=True)
+
+    # gene abundance normalization factors (independent of sample normalization)
+    tis_df['GeneRNASeqRPM'] = ((tis_df['GeneRNASeqCounts'] + pseudocount) / tis_df['TotalRNASeqCounts']) * 1e6
+    tis_df['GeneRNASeqLogRPM'] = np.log2(tis_df['GeneRNASeqRPM'])
+    tis_df['GeneAbundanceScaleFactor'] = tis_df['GeneRNASeqLogRPM'].median() / tis_df['GeneRNASeqLogRPM']
+    tis_df.loc[tis_df['GeneRNASeqLogRPM'] == 0, 'GeneAbundanceScaleFactor'] = np.nan
+
+    tis_df['SampleNormalizedTISCounts'] = tis_df['TISCounts'] * tis_df['SampleScaleFactor']
+    tis_df['GeneNormalizedTISCounts'] = tis_df['TISCounts'] * tis_df['GeneAbundanceScaleFactor']
+    tis_df['FullNormalizedTISCounts'] = tis_df['TISCounts'] * tis_df['SampleScaleFactor'] * tis_df['GeneAbundanceScaleFactor']
+    
+    return tis_df
+
+def pair_canonical_isoforms(tis_df, id_columns=['Sample', 'Tid'], 
+                            canonical_columns=['IsoformID', 'Start', 'StartCodon', 'TISCounts', 'NormTISCounts', 
+                                               'SampleNormalizedTISCounts', 'GeneNormalizedTISCounts', 'FullNormalizedTISCounts'],
+                            downstream_calculations=True):
+    tis_df = tis_df.copy()
+
+    id_columns = [col for col in id_columns if col in tis_df.columns]
+    alternative_subset = tis_df[~tis_df['RecatTISType'].isin(['Annotated'])]
+    canonical_subset = tis_df[tis_df['RecatTISType'].isin(['Annotated'])].drop_duplicates(subset=id_columns).set_index(id_columns)[canonical_columns].add_prefix('Canonical', axis=1)
+    paired_df = alternative_subset.merge(canonical_subset, left_on=id_columns, right_index=True)
+
+    if downstream_calculations:
+        paired_df = paired_df.assign(
+            StartRelativeToCanonical = lambda x: x['CanonicalStart'] - x['Start'],
+            DistanceToCanonical = lambda x: (x['StartRelativeToCanonical']).abs(),
+            FoldChangeFromCanonical = lambda x: (x['TISCounts']+1) / (x['CanonicalTISCounts']+1),
+            LogFoldChangeFromCanonical = lambda x: np.log2(x['FoldChangeFromCanonical']),
+            SampleNormalizedLFC = lambda x: np.log2((x['SampleNormalizedTISCounts']) + 1) - np.log2((x['CanonicalSampleNormalizedTISCounts'] + 1)),
+            GeneNormalizedLFC = lambda x: np.log2((x['GeneNormalizedTISCounts']) + 1) - np.log2((x['CanonicalGeneNormalizedTISCounts'] + 1)),
+            FullNormalizedLFC = lambda x: np.log2((x['FullNormalizedTISCounts']) + 1) - np.log2((x['CanonicalFullNormalizedTISCounts'] + 1))
+        )
+    return paired_df

@@ -128,3 +128,78 @@ def plot_tis_over_cell_lines(transcript_id, tis_summary_df, te_matrix,
             Patch(facecolor=c, edgecolor='white', label=s) for s, c in sample_palette.items()
         ], loc='lower left', bbox_to_anchor=(1, -0.1)
     )
+
+def plot_volcano(df, x='log2FoldChange', y='padj', transform_y=lambda x: -np.log10(x), min_x=1, max_p=0.05, **plt_kws):
+    plot_df = df.copy()
+    plot_df['x'] = plot_df[x]
+    
+    if transform_y is None:
+        transform_y = lambda x: x
+    plot_df['y'] = transform_y(plot_df[y])
+    hline = transform_y(max_p)
+
+    plot_df['highlight'] = (plot_df['x'].abs() > min_x) & (plot_df['y'] > hline)
+
+    sns.scatterplot(plot_df, x='x', y='y', hue='highlight', palette={True: 'tab:blue', False: 'tab:gray'}, **plt_kws)
+    plt.gca().axhline(hline, color='red', linestyle='dotted', alpha=0.5)
+    plt.gca().axvline(-min_x, color='red', linestyle='dotted', alpha=0.5)
+    plt.gca().axvline(min_x, color='red', linestyle='dotted', alpha=0.5)
+    return plt.gca()
+
+
+def plot_cross_scatter(merged_tis_rna_df, max_lfc_se = 1):
+    plot_df = merged_tis_rna_df.copy()
+
+    plot_df.loc[:, 'Significant'] = 'Neither'
+    plot_df.loc[plot_df['SigRibo'], 'Significant'] = 'Ribo'
+    plot_df.loc[plot_df['SigRNA'], 'Significant'] = 'RNA'
+    plot_df.loc[plot_df['SigRibo'] & plot_df['SigRNA'], 'Significant'] = 'Both'
+
+    filtered_plot_df = plot_df[
+        (plot_df['Ribo_lfcSE'] < max_lfc_se) &
+        (plot_df['RNA_lfcSE'] < max_lfc_se)
+    ]
+
+    sns.scatterplot(
+        filtered_plot_df[filtered_plot_df['Significant'] == 'Neither'],
+        x='RNA_log2FoldChange', y='Ribo_log2FoldChange', 
+        color='tab:gray', alpha=0.5, size=2, legend=False
+    )
+    sns.scatterplot(
+        filtered_plot_df[filtered_plot_df['Significant'] != 'Neither'], 
+        x='RNA_log2FoldChange', y='Ribo_log2FoldChange', 
+        hue='Significant', palette={'Ribo': 'tab:blue', 'RNA': 'tab:red', 'Both': 'tab:purple'}
+    )
+    plt.gca().axhline(0, color='black', linestyle='dashed', alpha=0.5)
+    plt.gca().axvline(0, color='black', linestyle='dashed', alpha=0.5)
+    return plt.gca(), filtered_plot_df
+
+def plot_geneset_stem(gsea_df_up, gsea_df_down, top_n=5, 
+                      term_column='Term', size_column='Odds Ratio', p_column='Adjusted P-value', significance_threshold=0.05,
+                      figsize=(12, 6)):
+    up_df = gsea_df_up.sort_values(p_column).head(top_n).copy()
+    up_df['p_transform'] = -np.log10(up_df[p_column])
+    up_df['Geneset'] = up_df[term_column].apply(lambda x: x.split('_')[0] + ': ' + ' '.join([y.title() for y in x.split('_')[1:]]))
+    
+    down_df = gsea_df_down.sort_values(p_column).head(top_n).copy()
+    down_df['p_transform'] = -np.log10(down_df[p_column])
+    down_df['Geneset'] = down_df[term_column].apply(lambda x: x.split('_')[0] + ': ' + ' '.join([y.title() for y in x.split('_')[1:]]))
+
+    fig, axs = plt.subplots(1, 2, figsize=figsize, gridspec_kw={'wspace': 0})
+    sns.barplot(down_df, x='p_transform', y='Geneset', color='tab:blue', ax=axs[0])
+    sns.barplot(up_df, x='p_transform', y='Geneset', color='tab:red', ax=axs[1])
+
+    max_lim = max(axs[0].get_xlim()[1], axs[1].get_xlim()[1])
+    axs[0].set_xlim(0, max_lim)
+    axs[1].set_xlim(0, max_lim)
+
+    axs[0].invert_xaxis()
+    axs[0].set_xlabel('-log10 (FDR-adjusted p-value)')
+    axs[1].set_xlabel('-log10 (FDR-adjusted p-value)')
+    axs[1].yaxis.set_label_position('right')
+    axs[1].yaxis.tick_right()
+
+    axs[0].axvline(-np.log10(significance_threshold), color='black', linestyle='dashed', alpha=0.5)
+    axs[1].axvline(-np.log10(significance_threshold), color='black', linestyle='dashed', alpha=0.5)
+
+    return fig, axs
