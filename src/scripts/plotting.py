@@ -11,6 +11,13 @@ import re
 # convenience
 from tqdm import tqdm
 
+# create a dictionary of labels to colors
+def make_palette_dict(elements, palette_name, cycle=0):
+    colors_requested = len(elements) + cycle
+    colors = sns.color_palette(palette_name, n_colors=colors_requested)
+    return pd.Series(colors[cycle:], index=elements)
+
+# plotting TISs across samples while visualizing other TISs on the transcript
 def plot_tis_over_cell_lines(transcript_id, tis_summary_df, te_matrix, 
                              figsize=(16, 3), range_extension=0.01, cds_height_scale=0.05, position_width=2.4, 
                              sample_palette='tab10', tis_type_palette='Set2', upstream_crop=100):
@@ -58,6 +65,7 @@ def plot_tis_over_cell_lines(transcript_id, tis_summary_df, te_matrix,
         sample_palette = pd.Series(sns.color_palette(sample_palette, n_colors=len(unique_samples)), index=unique_samples)
     elif isinstance(sample_palette, dict):
         sample_palette = pd.Series(sample_palette)
+        sample_palette = sample_palette[sample_palette.index.isin(unique_samples)]
     elif not isinstance(sample_palette, pd.Series):
         raise TypeError('`sample_palette`')
     
@@ -66,6 +74,7 @@ def plot_tis_over_cell_lines(transcript_id, tis_summary_df, te_matrix,
         tis_type_palette = pd.Series(sns.color_palette(tis_type_palette, n_colors=len(unique_tis_types)), index=unique_tis_types)
     elif isinstance(tis_type_palette, dict):
         tis_type_palette = pd.Series(tis_type_palette)
+        tis_type_palette = tis_type_palette[tis_type_palette.index.isin(unique_tis_types)]
     elif not isinstance(tis_type_palette, pd.Series):
         raise TypeError('`tis_type_palette`')
 
@@ -129,6 +138,7 @@ def plot_tis_over_cell_lines(transcript_id, tis_summary_df, te_matrix,
         ], loc='lower left', bbox_to_anchor=(1, -0.1)
     )
 
+# volcano plot
 def plot_volcano(df, x='log2FoldChange', y='padj', transform_y=lambda x: -np.log10(x), min_x=1, max_p=0.05, **plt_kws):
     plot_df = df.copy()
     plot_df['x'] = plot_df[x]
@@ -146,7 +156,7 @@ def plot_volcano(df, x='log2FoldChange', y='padj', transform_y=lambda x: -np.log
     plt.gca().axvline(min_x, color='red', linestyle='dotted', alpha=0.5)
     return plt.gca()
 
-
+# scatterplot of two intersected volcano plots (specifically differential TIS and RNA results)
 def plot_cross_scatter(merged_tis_rna_df, max_lfc_se = 1):
     plot_df = merged_tis_rna_df.copy()
 
@@ -174,6 +184,7 @@ def plot_cross_scatter(merged_tis_rna_df, max_lfc_se = 1):
     plt.gca().axvline(0, color='black', linestyle='dashed', alpha=0.5)
     return plt.gca(), filtered_plot_df
 
+# plot geneset enrichment results as symmetric barplots (in future, can add circles with varied size according to another property, such as the odds ratio)
 def plot_geneset_stem(gsea_df_up, gsea_df_down, top_n=5, 
                       term_column='Term', size_column='Odds Ratio', p_column='Adjusted P-value', significance_threshold=0.05,
                       figsize=(12, 6)):
@@ -203,3 +214,75 @@ def plot_geneset_stem(gsea_df_up, gsea_df_down, top_n=5,
     axs[1].axvline(-np.log10(significance_threshold), color='black', linestyle='dashed', alpha=0.5)
 
     return fig, axs
+
+def plot_forest(fold_change_table, log_scale=True, figsize=(8,6), 
+                factor_palette=make_palette_dict(['NumUpstreamATG', 'NumUpstreamNonATG', 'KozakMajorHammingDistance', 'CanonicalUTRLength'], 'Accent').to_dict(), 
+                loc='upper left', bbox_to_anchor=(1, 1), legend_label_map=None):
+    """
+    Creates a forest plot of fold-change effects per factor per cell line.
+    
+    Parameters:
+        fold_change_table: DataFrame with columns:
+            ['cell_line', 'factor', 'fold_change', 'fold_change_CI_low', 'fold_change_CI_high']
+        log_scale: whether to plot on log scale (recommended)
+        figsize: figure size
+        title: plot title
+    """
+    df = fold_change_table.copy()
+    
+    # log transform if desired
+    if log_scale:
+        df['x'] = np.log(df['fold_change'])
+        df['x_low'] = np.log(df['fold_change_CI_low'])
+        df['x_high'] = np.log(df['fold_change_CI_high'])
+        df['err_low'] = df['x'] - df['x_low']
+        df['err_high'] = df['x_high'] - df['x']
+        ref_line = 0
+        xlabel = 'Log Fold-Change'
+    else:
+        df['x'] = df['fold_change']
+        df['err_low'] = df['fold_change'] - df['fold_change_CI_low']
+        df['err_high'] = df['fold_change_CI_high'] - df['fold_change']
+        ref_line = 1
+        xlabel = 'Fold-Change'
+    
+    # create a numeric y-position
+    df['y_pos'] = df.groupby('factor').cumcount()
+    # adjust spacing to separate factors
+    factor_offsets = {f:i*(df['y_pos'].max()+2) for i,f in enumerate(df['factor'].unique())}
+    df['y'] = df.apply(lambda r: r['y_pos'] + factor_offsets[r['factor']], axis=1)
+    
+    plt.figure(figsize=figsize)
+    
+    # plot points and error bars
+    for idx, row in df.iterrows():
+        plt.errorbar(row['x'], row['y'], xerr=[[row['err_low']], [row['err_high']]],
+                     fmt='o', color=factor_palette[row['factor']], capsize=4)
+    
+    # y-ticks: show cell line names where possible
+    # to avoid overlaps, only show the first occurrence per factor
+    yticks = []
+    yticklabels = []
+    for f in df['factor'].unique():
+        sub = df[df['factor'] == f]
+        for _, r in sub.iterrows():
+            yticks.append(r['y'])
+            yticklabels.append(f"{r['sample']}")
+    
+    plt.yticks(yticks, yticklabels)
+    
+    # reference line
+    plt.axvline(ref_line, color='gray', linestyle='--')
+    
+    plt.xlabel(xlabel)
+    plt.ylabel('Cell line')
+    
+    # legend
+    if legend_label_map is None:
+        legend_label_map = {label: label for label in factor_palette.keys()}
+    handles = [plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=c, markersize=8, label=legend_label_map[f])
+               for f, c in factor_palette.items()]
+    plt.legend(handles=handles, title='Factor', bbox_to_anchor=bbox_to_anchor, loc=loc)
+    
+    plt.gca().invert_yaxis()
+    return plt.gcf(), plt.gca()
